@@ -281,8 +281,8 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
   try {
 
     std::string requestUrl = string_format(
-        "https://api.spotify.com/v1/storage-resolve/files/audio/interactive/"
-        "%s?alt=json&product=9",
+        "https://spclient.wg.spotify.com/storage-resolve/files/audio/interactive/"
+        "%s?version=10000000&product=9&platform=39&alt=json",
         bytesToHexString(fileId).c_str());
 
     auto req = bell::HTTPClient::get(
@@ -292,13 +292,34 @@ void QueuedTrack::stepLoadCDNUrl(const std::string& accessKey) {
     // Wait for response
     std::string_view result = req->body();
 
+    // Jukebox-fix: log the first 256 bytes of the CDN response for diagnostics
+    CSPOT_LOG(debug, "CDN response (first 256B): %.*s",
+              (int)std::min<size_t>(256, result.size()), result.data());
+
 #ifdef BELL_ONLY_CJSON
     cJSON* jsonResult = cJSON_Parse(result.data());
-    cdnUrl = cJSON_GetArrayItem(cJSON_GetObjectItem(jsonResult, "cdnurl"), 0)
-                 ->valuestring;
+    if (jsonResult == nullptr) {
+      throw std::runtime_error("Failed to parse CDN response JSON");
+    }
+    cJSON* cdnArray = cJSON_GetObjectItem(jsonResult, "cdnurl");
+    if (cdnArray == nullptr || !cJSON_IsArray(cdnArray) ||
+        cJSON_GetArraySize(cdnArray) == 0) {
+      cJSON_Delete(jsonResult);
+      throw std::runtime_error("No CDN URL in response");
+    }
+    cJSON* cdnFirst = cJSON_GetArrayItem(cdnArray, 0);
+    if (cdnFirst == nullptr || cdnFirst->valuestring == nullptr) {
+      cJSON_Delete(jsonResult);
+      throw std::runtime_error("No CDN URL in response");
+    }
+    cdnUrl = cdnFirst->valuestring;
     cJSON_Delete(jsonResult);
 #else
     auto jsonResult = nlohmann::json::parse(result);
+    if (!jsonResult.contains("cdnurl") || !jsonResult["cdnurl"].is_array() ||
+        jsonResult["cdnurl"].empty()) {
+      throw std::runtime_error("No CDN URL in response");
+    }
     cdnUrl = jsonResult["cdnurl"][0];
 #endif
 
@@ -410,8 +431,19 @@ void TrackQueue::runTask() {
   while (isRunning) {
     processSemaphore->twait(100);
 
-    // Make sure we have the newest access key
-    accessKey = accessKeyFetcher->getAccessKey();
+    // Make sure we have the newest access key.
+    // Jukebox-fix: a transient access-key refresh failure (TLS memory
+    // contention, network blip) used to propagate out of the task and kill
+    // the queue. Catch and continue — the next iteration retries.
+    try {
+      accessKey = accessKeyFetcher->getAccessKey();
+    } catch (const std::exception& e) {
+      CSPOT_LOG(error, "accessKeyFetcher failed: %s", e.what());
+      continue;
+    } catch (...) {
+      CSPOT_LOG(error, "accessKeyFetcher failed: unknown error");
+      continue;
+    }
 
     int loadedIndex = currentTracksIndex;
 
