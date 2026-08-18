@@ -111,10 +111,17 @@ void PlaybackState::setPlaybackState(const PlaybackState::State state) {
 }
 
 void PlaybackState::syncWithRemote() {
-  innerFrame.state.context_uri = (char*)realloc(
-      innerFrame.state.context_uri, strlen(remoteFrame.state.context_uri) + 1);
-
-  strcpy(innerFrame.state.context_uri, remoteFrame.state.context_uri);
+  const char* remoteUri = remoteFrame.state.context_uri;
+  if (remoteUri == nullptr) {
+    // Single-track playback started via the Web API carries no context_uri;
+    // nanopb leaves the optional field NULL. strlen(NULL) would panic.
+    free(innerFrame.state.context_uri);
+    innerFrame.state.context_uri = nullptr;
+  } else {
+    innerFrame.state.context_uri =
+        (char*)realloc(innerFrame.state.context_uri, strlen(remoteUri) + 1);
+    strcpy(innerFrame.state.context_uri, remoteUri);
+  }
 
   innerFrame.state.has_playing_track_index = true;
   innerFrame.state.playing_track_index = remoteFrame.state.playing_track_index;
