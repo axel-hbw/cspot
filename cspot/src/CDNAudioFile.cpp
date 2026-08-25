@@ -1,6 +1,7 @@
 #include "CDNAudioFile.h"
 
 #include <string.h>          // for memcpy
+#include <exception>         // for std::exception (Jukebox-fix: CDN read guard)
 #include <functional>        // for __base
 #include <initializer_list>  // for initializer_list
 #include <map>               // for operator!=, operator==
@@ -130,11 +131,29 @@ size_t CDNAudioFile::readBytes(uint8_t* dst, size_t bytes) {
       this->enableRequestMargin = false;
     }
 
-    this->httpConnection->get(
-        cdnUrl, {bell::HTTPClient::RangeHeader::range(
-                    requestPosition, requestPosition + HTTP_BUFFER_SIZE - 1)});
-    this->lastRequestPosition = requestPosition;
-    this->lastRequestCapacity = this->httpConnection->contentLength();
+    // Jukebox-fix: the range GET runs synchronously on the cspot_player task
+    // and can throw when the CDN keep-alive socket has been closed/reset (see
+    // bell HTTPClient readResponseHeaders). Letting that exception unwind into
+    // tremor's C frames terminates the process; instead signal EOF so the
+    // track ends and the queue advances cleanly.
+    try {
+      this->httpConnection->get(
+          cdnUrl, {bell::HTTPClient::RangeHeader::range(
+                      requestPosition, requestPosition + HTTP_BUFFER_SIZE - 1)});
+      this->lastRequestPosition = requestPosition;
+      this->lastRequestCapacity = this->httpConnection->contentLength();
+    } catch (const std::exception& e) {
+      CSPOT_LOG(error, "CDN range request failed, ending track: %s", e.what());
+      return 0;
+    }
+
+    // Jukebox-fix: a zero-length response would make the recursive readBytes()
+    // below re-enter this branch and re-request forever (another CPU-starving
+    // spin). Treat it as EOF.
+    if (this->lastRequestCapacity == 0) {
+      CSPOT_LOG(error, "CDN range request returned no data, ending track");
+      return 0;
+    }
 
     this->httpConnection->stream().read((char*)this->httpBuffer.data(),
                                         lastRequestCapacity);
