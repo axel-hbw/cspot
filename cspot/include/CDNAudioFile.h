@@ -57,7 +57,15 @@ class CDNAudioFile {
   const int OPUS_FOOTER_PREFFERED = 1024 * 12;  // 12K should be safe
   const int SEEK_MARGIN_SIZE = 1024 * 4;
 
-  const int HTTP_BUFFER_SIZE = 1024 * 14;
+  // Jukebox patch: 14K -> 64K. readBytes() does a *synchronous, blocking* HTTP
+  // range GET each time the decoder drains this window, on the same task that
+  // produces PCM. At 14K (~0.8-1.2 s of audio) that stalls playback ~once a
+  // second; a slow round-trip then drains the audio ring buffer and glitches.
+  // 64K (~3.5-5 s per fetch) cuts the stall frequency ~4x. The buffer is a
+  // std::vector, and this build sets CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0, so
+  // it lands in PSRAM (8 MB) — it does NOT consume the scarce internal RAM the
+  // I2S DMA / hardware-AES need. See firmware/docs/vendor-patches.md.
+  const int HTTP_BUFFER_SIZE = 1024 * 64;
   const int SPOTIFY_OPUS_HEADER = 167;
 
   // Used to store opus metadata, speeds up read
